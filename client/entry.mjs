@@ -144,7 +144,8 @@ function msgIdOf(unit) {
 function classifyUnit(unit) {
 	if (unit.kind === "trail") return "commentary";
 	if (unit.kind === "mixedItem") {
-		// 拆块归类：最后一个工具卡之后的可见正文 = 最终答案，留在分组外。
+		// 思考胶囊即使在混排里也属中间步骤，一律收进组；最后一个工具卡之后的可见正文 = 最终答案，留在组外。
+		if (unit.node.matches?.(".thinking, [data-thinking]")) return "commentary";
 		if (unit.afterLastTool && visibleTextOf(unit.node)) return "final_answer";
 		return "commentary";
 	}
@@ -180,18 +181,24 @@ function collectRuns(container) {
 
 	const runs = [];
 	let open = null;
+	const closeRun = (endedBy) => {
+		if (!open) return;
+		if (!open.endedBy) open.endedBy = endedBy;
+		runs.push(open);
+		open = null;
+	};
 	for (const unit of units) {
 		const kind = classifyUnit(unit);
 		if (kind !== "commentary") {
-			if (open) runs.push(open);
-			open = null;
+			// 记录分组收尾方式：紧跟最终答案 = 正常轮次；用户/系统边界 = 被打断；惰性占位符 = 未知。
+			closeRun(kind === "final_answer" ? "final" : unit.kind === "placeholder" ? "unknown" : "interrupted");
 			continue;
 		}
 		// message 粒度：每条中间消息单独成组（宿主已聚成 trail 的，拆到里面每条）。
 		if (!open) open = { members: [] };
 		open.members.push(unit);
 	}
-	if (open) runs.push(open);
+	closeRun("interrupted");
 	const filled = runs.filter((run) => run.members.length > 0);
 
 	// 吸收「紧随其后的最终答案」自带的思考块：本轮 reasoning 属于这一轮，
@@ -252,11 +259,21 @@ function splitTrail(unit) {
  */
 function attachedThinking(container, lastMemberNode) {
 	const found = [];
-	let node = lastMemberNode ? lastMemberNode.nextElementSibling : null;
+	// 成员可能嵌在集群内部：无后继兄弟时逐层上捐，直到容器层级，继续找后续消息。
+	const nextRelevant = (el) => {
+		let cur = el;
+		while (cur && cur !== container) {
+			const next = cur.nextElementSibling;
+			if (next) return next;
+			cur = cur.parentElement;
+		}
+		return null;
+	};
+	let node = lastMemberNode ? nextRelevant(lastMemberNode) : null;
 	while (node) {
 		const unit = resolveUnit(node);
 		if (!unit) {
-			node = node.nextElementSibling;
+			node = nextRelevant(node);
 			continue;
 		}
 		if (unit.kind !== "assistant") break;
@@ -357,13 +374,15 @@ function clearMarks(container) {
 	state.signatures.delete(container);
 }
 
-function headLabel(live, elapsedMs, steps) {
+function headLabel(live, elapsedMs, steps, endedBy) {
 	if (live) return "工作中";
-	const text = formatDuration(elapsedMs);
-	return text ? "工作 " + text : "已完成";
+	const dur = formatDuration(elapsedMs);
+	if (endedBy === "interrupted") return dur ? "已中断 · 用时 " + dur : "已中断";
+	if (dur) return "用时 " + dur;
+	return steps ? steps + " 步" : "✂";
 }
 
-function buildHead(key, collapsed, live, elapsedMs, steps) {
+function buildHead(key, collapsed, live, elapsedMs, steps, endedBy) {
 	const head = document.createElement("button");
 	head.type = "button";
 	head.setAttribute("data-cm-group-head", key);
@@ -376,7 +395,7 @@ function buildHead(key, collapsed, live, elapsedMs, steps) {
 
 	const textEl = document.createElement("span");
 	textEl.className = "cm-head-text";
-	textEl.textContent = headLabel(live, elapsedMs, steps);
+	textEl.textContent = headLabel(live, elapsedMs, steps, endedBy);
 	if (live) textEl.setAttribute("data-cm-live", "");
 
 	head.append(caret, textEl);
@@ -448,7 +467,7 @@ function layout(container) {
 		if (run.live && !state.liveSince.has(key)) state.liveSince.set(key, Date.now());
 		const elapsedMs = run.live ? 0 : groupElapsed(run, state.liveSince.get(key));
 
-		const head = buildHead(key, collapsed, run.live, elapsedMs, steps);
+		const head = buildHead(key, collapsed, run.live, elapsedMs, steps, run.endedBy);
 		head.addEventListener("click", () => {
 			const next = head.getAttribute("aria-expanded") !== "false";
 			head.setAttribute("aria-expanded", next ? "false" : "true");
