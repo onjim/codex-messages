@@ -104,7 +104,7 @@ function resolveUnit(node) {
 	if (node.nodeType !== 1) return null;
 	if (node.hasAttribute("data-cm-group-head")) return { kind: "head", node };
 	if (node.classList.contains("msg-lazy-ph")) return { kind: "placeholder", node };
-	if (node.classList.contains("turn-tools-trail")) return { kind: "trail", node };
+	if (node.classList.contains("turn-tools-trail") || node.hasAttribute("data-cluster-id")) return { kind: "trail", node };
 
 	const msg = node.matches?.(".msg") ? node : node.querySelector?.(":scope > * > .msg, :scope > .msg");
 	if (!msg) return { kind: "other", node };
@@ -165,14 +165,17 @@ function collectRuns(container) {
 	for (const child of container.children) {
 		const unit = resolveUnit(child);
 		if (!unit || unit.kind === "head") continue;
-		if (unit.kind === "assistant" && hasToolCard(unit.node)) {
-			const parts = splitMixed(unit);
-			if (parts) {
-				units.push(...parts);
-				continue;
+		const expanded = unit.kind === "trail" ? splitTrail(unit) : [unit];
+		for (const part of expanded) {
+			if (part.kind === "assistant" && hasToolCard(part.node)) {
+				const mixed = splitMixed(part);
+				if (mixed) {
+					units.push(...mixed);
+					continue;
+				}
 			}
+			units.push(part);
 		}
-		units.push(unit);
 	}
 
 	const runs = [];
@@ -203,7 +206,8 @@ function collectRuns(container) {
 	for (let i = 0; i < filled.length; i += 1) {
 		const lastMember = filled[i].members[filled[i].members.length - 1].node;
 		const running = state.streaming || hostIsRunning();
-		filled[i].live = running && i === filled.length - 1 && lastMember === container.lastElementChild;
+		filled[i].live =
+			running && i === filled.length - 1 && (lastMember === container.lastElementChild || Boolean(container.lastElementChild?.contains?.(lastMember)));
 	}
 	return filled;
 }
@@ -237,8 +241,9 @@ function splitMixed(unit) {
 
 function splitTrail(unit) {
 	const inner = Array.from(unit.node.children).filter((child) => child.querySelector?.(".msg, .toolcall, .thinking"));
-	if (inner.length <= 1) return [unit];
-	return inner.map((node) => ({ kind: "trailItem", node, msg: node.querySelector?.(".msg") || node }));
+	if (inner.length === 0) return [unit];
+	// 拆成逐条消息单元走正常归类（含 mixed 拆块），整坠吞折叠会把集群尾部的最终答案吞掉。
+	return inner.map((node) => ({ kind: "assistant", node, msg: node.querySelector?.(".msg") || node }));
 }
 
 /**
