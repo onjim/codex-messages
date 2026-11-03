@@ -143,6 +143,11 @@ function msgIdOf(unit) {
  */
 function classifyUnit(unit) {
 	if (unit.kind === "trail") return "commentary";
+	if (unit.kind === "mixedItem") {
+		// 拆块归类：最后一个工具卡之后的可见正文 = 最终答案，留在分组外。
+		if (unit.afterLastTool && visibleTextOf(unit.node)) return "final_answer";
+		return "commentary";
+	}
 	if (unit.kind !== "assistant") return "boundary";
 
 	const id = msgIdOf(unit);
@@ -156,9 +161,19 @@ function classifyUnit(unit) {
 
 /** 把连续的 commentary 单元切成若干组。 */
 function collectRuns(container) {
-	const units = Array.from(container.children)
-		.map((child) => resolveUnit(child))
-		.filter((unit) => unit && unit.kind !== "head");
+	const units = [];
+	for (const child of container.children) {
+		const unit = resolveUnit(child);
+		if (!unit || unit.kind === "head") continue;
+		if (unit.kind === "assistant" && hasToolCard(unit.node)) {
+			const parts = splitMixed(unit);
+			if (parts) {
+				units.push(...parts);
+				continue;
+			}
+		}
+		units.push(unit);
+	}
 
 	const runs = [];
 	let open = null;
@@ -199,6 +214,27 @@ function collectRuns(container) {
  * message 粒度用：把宿主聚类的 trail 拆成内部每条消息。
  * 分组头插到 trail 内部，成员只靠内联 display 收起，绝不搬动宿主节点。
  */
+/**
+ * 单条消息内混排拆块：宿主常把一轮输出塑进同一条 assistant 消息（thinking + 旁白 +
+ * 工具卡 + 最终正文）。若最后一个工具卡之后还有可见正文，按 .msg-body 子块拆开归类，
+ * 避免最终答案被整条吞进折叠分组。拆不出块就维持整条归类（不会更差）。
+ */
+function splitMixed(unit) {
+	const body = unit.msg?.querySelector(".msg-body") || unit.msg;
+	if (!body) return null;
+	const BLOCK = ".toolcall, .tool-call, [data-toolcall-id], .thinking, [data-thinking], .msg-text-main, .msg-text";
+	const blocks = Array.from(body.children).filter((el) => el.matches?.(BLOCK) || el.querySelector?.(BLOCK));
+	if (blocks.length <= 1) return null;
+	const TOOL = ".toolcall, .tool-call, [data-toolcall-id]";
+	let lastTool = -1;
+	blocks.forEach((el, i) => {
+		if (el.matches?.(TOOL) || el.querySelector?.(TOOL)) lastTool = i;
+	});
+	if (lastTool < 0 || lastTool === blocks.length - 1) return null;
+	if (!blocks.slice(lastTool + 1).some((el) => visibleTextOf(el))) return null;
+	return blocks.map((node, i) => ({ kind: "mixedItem", node, msg: unit.msg, afterLastTool: i > lastTool }));
+}
+
 function splitTrail(unit) {
 	const inner = Array.from(unit.node.children).filter((child) => child.querySelector?.(".msg, .toolcall, .thinking"));
 	if (inner.length <= 1) return [unit];
